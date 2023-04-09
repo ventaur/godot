@@ -117,6 +117,9 @@ private:
 
 	Ref<Material> material;
 
+	mutable HashMap<StringName, Variant> instance_shader_parameters;
+	mutable HashMap<StringName, StringName> instance_shader_parameter_property_remap;
+
 	mutable Transform2D global_transform;
 	mutable bool global_invalid = true;
 
@@ -144,7 +147,13 @@ private:
 	void _refresh_texture_filter_cache();
 	void _update_texture_filter_changed(bool p_propagate);
 
+	const StringName *_instance_uniform_get_remap(const StringName p_name) const;
+
 protected:
+	bool _set(const StringName &p_name, const Variant &p_value);
+	bool _get(const StringName &p_name, Variant &r_ret) const;
+	void _get_property_list(List<PropertyInfo> *p_list) const;
+
 	_FORCE_INLINE_ void _notify_transform() {
 		if (!is_inside_tree()) {
 			return;
@@ -333,6 +342,9 @@ public:
 
 	virtual void set_use_parent_material(bool p_use_parent_material);
 	bool get_use_parent_material() const;
+
+	void set_instance_shader_parameter(const StringName &p_name, const Variant &p_value);
+	Variant get_instance_shader_parameter(const StringName &p_name) const;
 
 	Ref<InputEvent> make_input_local(const Ref<InputEvent> &p_event) const;
 	Vector2 make_canvas_position_local(const Vector2 &screen_point) const;

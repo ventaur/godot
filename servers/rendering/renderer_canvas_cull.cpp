@@ -448,6 +448,8 @@ RID RendererCanvasCull::canvas_item_allocate() {
 }
 void RendererCanvasCull::canvas_item_initialize(RID p_rid) {
 	canvas_item_owner.initialize_rid(p_rid);
+	Item *item = canvas_item_owner.get_or_null(p_rid);
+	item->self = p_rid;
 }
 
 void RendererCanvasCull::canvas_item_set_parent(RID p_item, RID p_parent) {
@@ -1642,6 +1644,12 @@ void RendererCanvasCull::canvas_item_clear(RID p_item) {
 	ERR_FAIL_COND(!canvas_item);
 
 	canvas_item->clear();
+
+	if (canvas_item->update_item.in_list()) {
+		return;
+	}
+
+	_instance_item_update_list.add(&canvas_item->update_item);
 }
 
 void RendererCanvasCull::canvas_item_set_draw_index(RID p_item, int p_index) {
@@ -1675,6 +1683,109 @@ void RendererCanvasCull::canvas_item_set_use_parent_material(RID p_item, bool p_
 	ERR_FAIL_COND(!canvas_item);
 
 	canvas_item->use_parent_material = p_enable;
+}
+
+void RendererCanvasCull::_update_instance_shader_uniforms_from_material(HashMap<StringName, Item::InstanceShaderParameter>& isparams, const HashMap<StringName, Item::InstanceShaderParameter>& existing_isparams, RID p_material) {
+	List<RendererMaterialStorage::InstanceShaderParam> plist;
+	RSG::material_storage->material_get_instance_shader_parameters(p_material, &plist);
+	for (const RendererMaterialStorage::InstanceShaderParam &E : plist) {
+		StringName name = E.info.name;
+		if (isparams.has(name)) {
+			if (isparams[name].info.type != E.info.type) {
+				WARN_PRINT("More than one material in instance export the same instance shader uniform '" + E.info.name + "', but they do it with different data types. Only the first one (in order) will display correctly.");
+			}
+			if (isparams[name].index != E.index) {
+				WARN_PRINT("More than one material in instance export the same instance shader uniform '" + E.info.name + "', but they do it with different indices. Only the first one (in order) will display correctly.");
+			}
+			continue; //first one found always has priority
+		}
+
+		Item::InstanceShaderParameter isp;
+		isp.index = E.index;
+		isp.info = E.info;
+		isp.default_value = E.default_value;
+		if (existing_isparams.has(name)) {
+			isp.value = existing_isparams[name].value;
+		} else {
+			isp.value = E.default_value;
+		}
+		isparams[name] = isp;
+	}
+}
+
+void RendererCanvasCull::instance_item_set_shader_parameter(RID p_item, const StringName &p_parameter, const Variant &p_value) {
+	Item *item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_COND(!item);
+
+	ERR_FAIL_COND(p_value.get_type() == Variant::OBJECT);
+
+	HashMap<StringName, Item::InstanceShaderParameter>::Iterator E = item->instance_shader_uniforms.find(p_parameter);
+
+	if (!E) {
+		Item::InstanceShaderParameter isp;
+		isp.index = -1;
+		isp.info = PropertyInfo();
+		isp.value = p_value;
+		item->instance_shader_uniforms[p_parameter] = isp;
+	} else {
+		E->value.value = p_value;
+		if (E->value.index >= 0 && item->instance_allocated_shader_uniforms) {
+			int flags_count = 0;
+			if (E->value.info.hint == PROPERTY_HINT_FLAGS) {
+				// A small hack to detect boolean flags count and prevent overhead.
+				switch (E->value.info.hint_string.length()) {
+					case 3: // "x,y"
+						flags_count = 1;
+						break;
+					case 5: // "x,y,z"
+						flags_count = 2;
+						break;
+					case 7: // "x,y,z,w"
+						flags_count = 3;
+						break;
+				}
+			}
+			// Update directly.
+			RSG::material_storage->global_shader_parameters_instance_update(p_item, E->value.index, p_value, flags_count);
+		}
+	}
+}
+
+Variant RendererCanvasCull::instance_item_get_shader_parameter(RID p_item, const StringName& p_parameter) const {
+	const Item *item = const_cast<RendererCanvasCull *>(this)->canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_COND_V(!item, Variant());
+
+	if (item->instance_shader_uniforms.has(p_parameter)) {
+		return item->instance_shader_uniforms[p_parameter].value;
+	}
+	return Variant();
+}
+
+Variant RendererCanvasCull::instance_item_get_shader_parameter_default_value(RID p_item, const StringName& p_parameter) const {
+	const Item *item = const_cast<RendererCanvasCull *>(this)->canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_COND_V(!item, Variant());
+
+	if (item->instance_shader_uniforms.has(p_parameter)) {
+		return item->instance_shader_uniforms[p_parameter].default_value;
+	}
+	return Variant();
+}
+
+void RendererCanvasCull::instance_item_get_shader_parameter_list(RID p_item, List<PropertyInfo> *p_parameters) const {
+	const Item *item = const_cast<RendererCanvasCull *>(this)->canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_COND(!item);
+	
+	const_cast<RendererCanvasCull *>(this)->update_dirty_items();
+
+	Vector<StringName> names;
+	for (const KeyValue<StringName, Item::InstanceShaderParameter> &E : item->instance_shader_uniforms) {
+		names.push_back(E.key);
+	}
+	names.sort_custom<StringName::AlphCompare>();
+	for (int i = 0; i < names.size(); i++) {
+		PropertyInfo pinfo = item->instance_shader_uniforms[names[i]].info;
+		p_parameters->push_back(pinfo);
+	}
 }
 
 void RendererCanvasCull::canvas_item_set_visibility_notifier(RID p_item, bool p_enable, const Rect2 &p_area, const Callable &p_enter_callable, const Callable &p_exit_callable) {
@@ -2112,6 +2223,57 @@ void RendererCanvasCull::update_visibility_notifiers() {
 		}
 
 		E = N;
+	}
+}
+
+void RendererCanvasCull::_update_dirty_item(Item *p_item) {
+	HashMap<StringName, Item::InstanceShaderParameter> isparams;
+	_update_instance_shader_uniforms_from_material(isparams, p_item->instance_shader_uniforms, p_item->material);
+	p_item->instance_shader_uniforms = isparams;
+
+	if (p_item->instance_allocated_shader_uniforms != (p_item->instance_shader_uniforms.size() > 0)) {
+		p_item->instance_allocated_shader_uniforms = (p_item->instance_shader_uniforms.size() > 0);
+		if (p_item->instance_allocated_shader_uniforms) {
+			p_item->instance_allocated_shader_uniforms_offset = RSG::material_storage->global_shader_parameters_instance_allocate(p_item->self);
+			//ERR_FAIL_NULL(geom->geometry_instance);
+			//geom->geometry_instance->set_instance_shader_uniforms_offset(p_item->instance_allocated_shader_uniforms_offset);
+
+			for (const KeyValue<StringName, Item::InstanceShaderParameter> &E : p_item->instance_shader_uniforms) {
+				if (E.value.value.get_type() != Variant::NIL) {
+					int flags_count = 0;
+					if (E.value.info.hint == PROPERTY_HINT_FLAGS) {
+						// A small hack to detect boolean flags count and prevent overhead.
+						switch (E.value.info.hint_string.length()) {
+							case 3: // "x,y"
+								flags_count = 1;
+								break;
+							case 5: // "x,y,z"
+								flags_count = 2;
+								break;
+							case 7: // "x,y,z,w"
+								flags_count = 3;
+								break;
+						}
+					}
+					RSG::material_storage->global_shader_parameters_instance_update(p_item->self, E.value.index, E.value.value, flags_count);
+				}
+			}
+		} else {
+			RSG::material_storage->global_shader_parameters_instance_free(p_item->self);
+			p_item->instance_allocated_shader_uniforms_offset = -1;
+			//ERR_FAIL_NULL(geom->geometry_instance);
+			//geom->geometry_instance->set_instance_shader_uniforms_offset(-1);
+		}
+	}
+
+	_instance_item_update_list.remove(&p_item->update_item);
+}
+
+void RendererCanvasCull::update_dirty_items() {
+	RSG::utilities->update_dirty_resources();
+
+	while (_instance_item_update_list.first()) {
+		_update_dirty_item(_instance_item_update_list.first()->self());
 	}
 }
 

@@ -8316,10 +8316,6 @@ Error ShaderLanguage::_parse_shader(const HashMap<StringName, FunctionInfo> &p_f
 						}
 					}
 #endif // DEBUG_ENABLED
-					if (String(shader_type_identifier) != "spatial") {
-						_set_error(vformat(RTR("Uniform instances are not yet implemented for '%s' shaders."), shader_type_identifier));
-						return ERR_PARSE_ERROR;
-					}
 					if (OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
 						_set_error(RTR("Uniform instances are not supported in gl_compatibility shaders."));
 						return ERR_PARSE_ERROR;
